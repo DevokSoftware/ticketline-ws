@@ -5,7 +5,7 @@ What has to be done?
 [X] - Gather some info from the events - name, date, location, has multiple sessions, etc.
 [X] - Start fetching based on the month. For now lets fetch the events from the current month and the two next months.
 [X] - Start fetching based on the pagination. It can be done through the 'page' queryParam, and do requests and page=x doesn't retrieve any values (i guess it works).
-[ ] - If the event has multiple sessions, it should open the details page and fetch more info. use the href to open the details page. 
+[X] - If the event has multiple sessions, it should open the details page and fetch more info. use the href to open the details page. 
 [ ] - Get all the dates for this especific event after opening the details page.
 [ ] - Connect to the giggz DB.
 [ ] - I dont want to store all the events, only the ones i have stored in the standup table.
