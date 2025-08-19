@@ -6,10 +6,10 @@ What has to be done?
 [X] - Start fetching based on the month. For now lets fetch the events from the current month and the two next months.
 [X] - Start fetching based on the pagination. It can be done through the 'page' queryParam, and do requests and page=x doesn't retrieve any values (i guess it works).
 [X] - If the event has multiple sessions, it should open the details page and fetch more info. use the href to open the details page. 
-[ ] - Get all the dates for this especific event after opening the details page.
-[ ] - Connect to the giggz DB.
-[ ] - I dont want to store all the events, only the ones i have stored in the standup table.
-[ ] - Check if current event was already created. combination of name and date already exists
-[ ] - Search if the event location already exists in DB. If not, create it.  
+[X] - Get all the dates for this especific event after opening the details page.
+[X] - Connect to the giggz DB.
+[X] - I dont want to store all the events, only the ones i have stored in the standup table.
+[X] - Check if current event was already created. combination of name and date already exists
+[X] - Search if the event location already exists in DB. If not, add log to insert it later in DB.  
 [ ] - Get the comedians from the title. Check wether this is feasible or not
-[ ] - Store all the events in the DB with all the gathered data.
+[X] - Store all the events in the DB with all the gathered data.
