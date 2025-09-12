@@ -257,16 +257,16 @@ def find_matching_location(event_location, locations):
     event_location_lower = event_location.lower()
     
     for location_id, location_name in locations:
-        if location_name.lower() in event_location_lower:
+        if location_name.lower() in event_location_lower or event_location_lower in location_name.lower():
             print(f"📍 Event location '{event_location}' matches location '{location_name}' (ID: {location_id})")
             return location_id, location_name
     
     return None
 
-def save_events_to_db(events):
+def save_events_to_db(events, standups):
     """Save events to the database."""
     # First, fetch all standups and locations from the database
-    standups = get_standups_from_db()
+
     if not standups:
         print("❌ No standups found in database. Cannot save events.")
         return
@@ -284,10 +284,24 @@ def save_events_to_db(events):
     try:
         cursor = conn.cursor()
         
+        # create_table_sql = """
+        # CREATE TABLE IF NOT EXISTS event_script
+        # (
+        #     id         SERIAL PRIMARY KEY,
+        #     name       VARCHAR(500)             NOT NULL,
+        #     date       TIMESTAMP WITH TIME ZONE NOT NULL,
+        #     url        VARCHAR(1000)            NOT NULL,
+        #     location   INTEGER                  NOT NULL,
+        #     standup_id INTEGER                  NOT NULL,
+        #     UNIQUE (name, date)
+        # );
+        # """
+        # cursor.execute(create_table_sql)
+
         insert_sql = """
-        INSERT INTO event_script (name, date, url, location, standup_id) 
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (name, date) DO NOTHING
+        INSERT INTO event (name, date, url, location, standup_id, priority) 
+        VALUES (%s, %s, %s, %s, %s, 1)
+        ON CONFLICT (standup_id, date) DO NOTHING
         """
         
         saved_count = 0
@@ -436,37 +450,82 @@ def scrape_additional_sessions(page, event: Event):
         print(f"⚠️ Error loading details page: {e}")
         return []
 
-    session_elements = page.locator('#sessoes ul.sessions_list li')
-    if session_elements.count() == 0:
-        print(f"⚠️ No sessions found for {event.title}")
-        return []
-
     extra_events = []
-    for session in session_elements.all():
-        if session.locator('.date').count() == 0:
-            print("⚠️ Session is no longer available.")
-            continue
-        date_attr = session.locator('.date').get_attribute('content') or ''
-        title_text = session.locator('.details').get_attribute('content') or event.title
-        venue_text = session.locator('.venue').text_content() or ''
-        district_text = session.locator('.district').text_content() or ''
+    # Variant 1: classic sessions list under #sessoes
+    session_elements = page.locator('#sessoes ul.sessions_list li')
+    if session_elements.count() > 0:
+        for session in session_elements.all():
+            if session.locator('.date').count() == 0:
+                print("⚠️ Session is no longer available.")
+                continue
+            date_attr = session.locator('.date').get_attribute('content') or ''
+            title_text = event.title + " - " + session.locator('.details').get_attribute('content') or event.title
+            venue_text = session.locator('.venue').text_content() or ''
+            district_text = session.locator('.district').text_content() or ''
 
-        # Build the location string same as in main scrape
-        location_str = f"{venue_text.strip()} - {district_text.strip()}".strip(" -")
+            # Build the location string same as in main scrape
+            location_str = f"{venue_text.strip()} - {district_text.strip()}".strip(" -")
 
-        href = session.locator('a').get_attribute('href') or ''
-        full_url = BASE_URL + href if href.startswith('/') else href
+            href = session.locator('a').get_attribute('href') or ''
+            full_url = BASE_URL + href if href.startswith('/') else href
 
-        extra_events.append(Event(
-            title=title_text.strip(),
-            date=date_attr.strip(),
-            location=location_str,
-            has_multi_sessions=False,  # detail page sessions don't need further expansion
-            detailsPageUrl=full_url
-        ))
+            extra_events.append(Event(
+                title=title_text.strip(),
+                date=date_attr.strip(),
+                location=location_str,
+                has_multi_sessions=False,
+                detailsPageUrl=full_url
+            ))
 
-    print(f"➕ Found {len(extra_events)} extra sessions for {event.title}")
-    return extra_events
+        print(f"➕ Found {len(extra_events)} extra sessions for {event.title}")
+        return extra_events
+
+    # Variant 2: available events list under #eventList.available_events
+    available_container = page.locator('#eventList.available_events')
+    if available_container.count() > 0:
+        alt_items = available_container.locator('ul.events_list li')
+        if alt_items.count() == 0:
+            alt_items = available_container.locator('ul.list.events_list li')
+            if alt_items.count() == 0:
+                alt_items = available_container.locator('li')
+
+        for item in alt_items.all():
+            # Date can be in content or data-date
+            date_attr = (
+                item.locator('.date').get_attribute('content')
+                or item.locator('.date').get_attribute('data-date')
+                or ''
+            )
+            if not date_attr:
+                # Skip if we cannot determine a date
+                continue
+
+            title_text = (
+                event.title + " - " + item.locator('.title').text_content()
+                or event.title + " - " + item.locator('[itemprop="name"]').text_content()
+                or event.title
+            )
+            venue_text = (
+                item.locator('.venues').text_content()
+                or item.locator('.venue').text_content()
+                or ''
+            )
+            href = item.locator('a').get_attribute('href') or ''
+            full_url = BASE_URL + href if href.startswith('/') else href
+
+            extra_events.append(Event(
+                title=title_text.strip(),
+                date=date_attr.strip(),
+                location=venue_text.strip(),
+                has_multi_sessions=False,
+                detailsPageUrl=full_url
+            ))
+
+        print(f"➕ Found {len(extra_events)} extra sessions for {event.title}")
+        return extra_events
+
+    print(f"⚠️ No sessions found for {event.title}")
+    return []
 
 
 # Main execution
@@ -523,15 +582,17 @@ with sync_playwright() as p:
     main_events = []
     all_events = []
     
-    for i in range(1):
+    for i in range(3):
     # for i in range(3):  # current month + next 2
         month = (today.month + i - 1) % 12 + 1
         year = today.year + ((today.month + i - 1) // 12)
         main_events = scrape_events_for_month(page, month, year)
-        
+
+    standups = get_standups_from_db()
+    
     # It checks multi-sessions events
     for event in main_events[:]:  # iterate over a copy so we can extend the list
-        if event.has_multi_sessions:
+        if event.has_multi_sessions and find_matching_standup(event.title, standups) :
             extra = scrape_additional_sessions(page, event)
             all_events.extend(extra)
         else:
@@ -545,4 +606,4 @@ with sync_playwright() as p:
 
     # Save events to database
     print(f"\n💾 Saving {len(all_events)} events to database...")
-    save_events_to_db(all_events)
+    save_events_to_db(all_events, standups)
