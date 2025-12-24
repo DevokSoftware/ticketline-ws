@@ -7,18 +7,33 @@ from psycopg2.extras import RealDictCursor
 import re
 from datetime import datetime, timezone
 import os
+import sys
+from dotenv import load_dotenv
 from scraping_config import *
+
+# Load environment variables from .env file (for local development)
+# Try .env.local first (for local dev), then .env (for production-like local setup)
+load_dotenv('.env.local')  # Load local development env
+load_dotenv()  # Override with .env if it exists (lower priority)
 
 BASE_URL = "https://ticketline.sapo.pt"
 
-# Database configuration
+# Database configuration - uses environment variables (no defaults)
 DB_CONFIG = {
-    'host': 'localhost',
-    'port': 5433,
-    'database': 'giggz',
-    'user': 'admin',
-    'password': 'admin'
+    'host': os.getenv('DB_HOST'),
+    'port': int(os.getenv('DB_PORT')),
+    'database': os.getenv('DB_NAME'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD')
 }
+
+# Validate that all required environment variables are set
+required_vars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD']
+missing_vars = [var for var in required_vars if not os.getenv(var)]
+if missing_vars:
+    print(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
+    print("Please set these variables in your .env file or environment")
+    sys.exit(1)
 
 # Anti-detection configuration
 USER_AGENTS = [
@@ -263,6 +278,38 @@ def find_matching_location(event_location, locations):
     
     return None
 
+def create_location_in_db(location_string, cursor, conn):
+    """
+    Create a new location in the database from the location string.
+    Tries to parse city from location string if it contains " - " (format: "Venue - City").
+    Returns (location_id, location_name) tuple if successful, None otherwise.
+    """
+    # Try to parse location string: "Venue - City" or just "Venue"
+    if " - " in location_string:
+        parts = location_string.split(" - ", 1)
+        name = parts[0].strip()
+        city = parts[1].strip() if len(parts) > 1 else None
+    else:
+        name = location_string.strip()
+        city = None
+    
+    insert_location_sql = """
+    INSERT INTO location (name, city, street, "number")
+    VALUES (%s, %s, NULL, NULL)
+    RETURNING id
+    """
+    
+    try:
+        cursor.execute(insert_location_sql, (name, city))
+        location_id = cursor.fetchone()[0]
+        conn.commit()
+        print(f"✅ Created new location: '{name}' (ID: {location_id})" + (f" in city '{city}'" if city else ""))
+        return location_id, name
+    except psycopg2.Error as e:
+        print(f"❌ Error creating location '{name}': {e}")
+        conn.rollback()
+        return None
+
 def save_events_to_db(events, standups):
     """Save events to the database."""
     # First, fetch all standups and locations from the database
@@ -272,9 +319,7 @@ def save_events_to_db(events, standups):
         return
     
     locations = get_locations_from_db()
-    if not locations:
-        print("❌ No locations found in database. Cannot save events.")
-        return
+    # Note: We can create locations on the fly if they don't exist, so we don't need to return early
     
     conn = get_db_connection()
     if not conn:
@@ -321,33 +366,45 @@ def save_events_to_db(events, standups):
                 
                 if matching_location:
                     location_id, location_name = matching_location
-                    
-                    try:
-                        # Parse the date string to OffsetDateTime
-                        parsed_date = parse_date_to_offset_datetime(event.date)
-                        
-                        # Map fields: title -> name, detailsPageUrl -> url
-                        cursor.execute(insert_sql, (
-                            event.title,
-                            parsed_date,
-                            event.detailsPageUrl,
-                            location_id,
-                            standup_id
-                        ))
-                        
-                        if cursor.rowcount > 0:
-                            saved_count += 1
-                            print(f"💾 Saved: {event.title} (Standup: {standup_name}, Location: {location_name})")
-                        else:
-                            print(f"⏭️ Skipped (duplicate): {event.title}")
-                            
-                    except psycopg2.Error as e:
-                        print(f"❌ Error saving event '{event.title}': {e}")
-                        continue
                 else:
-                    skipped_location_count += 1
-                    unmatched_locations.add(event.location)
-                    print(f"🚫 Skipped (no matching location): {event.title} - Location: {event.location}")
+                    # Location doesn't exist, create it
+                    print(f"📍 Location not found, creating new location: {event.location}")
+                    result = create_location_in_db(event.location, cursor, conn)
+                    
+                    if result:
+                        location_id, location_name = result
+                        # Add the new location to the locations list to avoid duplicates
+                        locations.append((location_id, location_name))
+                    else:
+                        # Failed to create location, skip this event
+                        skipped_location_count += 1
+                        unmatched_locations.add(event.location)
+                        print(f"🚫 Skipped (failed to create location): {event.title} - Location: {event.location}")
+                        continue
+                
+                # Continue with event creation using the location_id
+                try:
+                    # Parse the date string to OffsetDateTime
+                    parsed_date = parse_date_to_offset_datetime(event.date)
+                    
+                    # Map fields: title -> name, detailsPageUrl -> url
+                    cursor.execute(insert_sql, (
+                        event.title,
+                        parsed_date,
+                        event.detailsPageUrl,
+                        location_id,
+                        standup_id
+                    ))
+                    
+                    if cursor.rowcount > 0:
+                        saved_count += 1
+                        print(f"💾 Saved: {event.title} (Standup: {standup_name}, Location: {location_name})")
+                    else:
+                        print(f"⏭️ Skipped (duplicate): {event.title}")
+                        
+                except psycopg2.Error as e:
+                    print(f"❌ Error saving event '{event.title}': {e}")
+                    continue
             else:
                 skipped_standup_count += 1
                 print(f"🚫 Skipped (no matching standup): {event.title}")
@@ -355,15 +412,15 @@ def save_events_to_db(events, standups):
         conn.commit()
         print(f"\n✅ Successfully saved {saved_count} new events to database")
         print(f"🚫 Skipped {skipped_standup_count} events (no matching standup)")
-        print(f"🚫 Skipped {skipped_location_count} events (no matching location)")
+        print(f"🚫 Skipped {skipped_location_count} events (failed to create location)")
         
-        # Print unmatched locations for manual addition
+        # Print locations that failed to be created
         if unmatched_locations:
-            print(f"\n📋 Unmatched locations that need to be added to the database:")
+            print(f"\n📋 Locations that failed to be created:")
             for location in sorted(unmatched_locations):
                 print(f"   - {location}")
         else:
-            print(f"\n✅ All event locations matched existing locations in database")
+            print(f"\n✅ All event locations were found or successfully created in database")
         
     except psycopg2.Error as e:
         print(f"❌ Database error: {e}")
@@ -529,81 +586,92 @@ def scrape_additional_sessions(page, event: Event):
 
 
 # Main execution
-with sync_playwright() as p:
-    # Launch browser with anti-detection settings
-    browser_args = [
-        '--no-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-dev-shm-usage',
-        '--disable-extensions',
-        '--disable-plugins',
-        '--disable-gpu',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-features=TranslateUI',
-        '--disable-ipc-flooding-protection'
-    ]
-    
-    if DISABLE_IMAGES:
-        browser_args.append('--disable-images')
-    
-    if DISABLE_JAVASCRIPT:
-        browser_args.append('--disable-javascript')
-    
-    browser = p.chromium.launch(
-        headless=HEADLESS,
-        args=browser_args
-    )
-    
-    # Create context with additional settings
-    context = browser.new_context(
-        viewport=None,  # Will be set by setup_anti_detection
-        user_agent=None,  # Will be set by setup_anti_detection
-        locale='pt-PT',
-        timezone_id='Europe/Lisbon',
-        permissions=['geolocation'],
-        extra_http_headers={
-            'Accept-Language': 'pt-PT,pt;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-    )
-    
-    page = context.new_page()
-    setup_anti_detection(page)  # Apply anti-detection measures
+try:
+    with sync_playwright() as p:
+        # Launch browser with anti-detection settings
+        browser_args = [
+            '--no-sandbox',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--disable-extensions',
+            '--disable-plugins',
+            '--disable-gpu',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
+            '--disable-features=TranslateUI',
+            '--disable-ipc-flooding-protection'
+        ]
+        
+        if DISABLE_IMAGES:
+            browser_args.append('--disable-images')
+        
+        if DISABLE_JAVASCRIPT:
+            browser_args.append('--disable-javascript')
+        
+        browser = p.chromium.launch(
+            headless=HEADLESS,
+            args=browser_args
+        )
+        
+        # Create context with additional settings
+        context = browser.new_context(
+            viewport=None,  # Will be set by setup_anti_detection
+            user_agent=None,  # Will be set by setup_anti_detection
+            locale='pt-PT',
+            timezone_id='Europe/Lisbon',
+            permissions=['geolocation'],
+            extra_http_headers={
+                'Accept-Language': 'pt-PT,pt;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+        )
+        
+        page = context.new_page()
+        setup_anti_detection(page)  # Apply anti-detection measures
 
-    today = datetime.today().date()
-    main_events = []
-    all_events = []
-    
-    for i in range(3):
-    # for i in range(3):  # current month + next 2
-        month = (today.month + i - 1) % 12 + 1
-        year = today.year + ((today.month + i - 1) // 12)
-        main_events = scrape_events_for_month(page, month, year)
+        today = datetime.today().date()
+        main_events = []
+        all_events = []
+        
+        for i in range(7):
+        # for i in range(3):  # current month + next 2
+            month = (today.month + i - 1) % 12 + 1
+            year = today.year + ((today.month + i - 1) // 12)
+            month_events = scrape_events_for_month(page, month, year)
+            main_events.extend(month_events)
 
-    standups = get_standups_from_db()
-    
-    # It checks multi-sessions events
-    for event in main_events[:]:  # iterate over a copy so we can extend the list
-        if event.has_multi_sessions and find_matching_standup(event.title, standups) :
-            extra = scrape_additional_sessions(page, event)
-            all_events.extend(extra)
-        else:
-            all_events.append(event)
+        standups = get_standups_from_db()
+        
+        # It checks multi-sessions events
+        for event in main_events[:]:  # iterate over a copy so we can extend the list
+            if event.has_multi_sessions and find_matching_standup(event.title, standups) :
+                extra = scrape_additional_sessions(page, event)
+                all_events.extend(extra)
+            else:
+                all_events.append(event)
 
-    browser.close()
+        browser.close()
 
-    print("\n--- ✅ All Events Found ---")
-    for event in all_events:
-        print(event)
+        print("\n--- ✅ All Events Found ---")
+        for event in all_events:
+            print(event)
 
-    # Save events to database
-    print(f"\n💾 Saving {len(all_events)} events to database...")
-    save_events_to_db(all_events, standups)
+        # Save events to database
+        print(f"\n💾 Saving {len(all_events)} events to database...")
+        save_events_to_db(all_events, standups)
+        
+        print("\n✅ Script completed successfully")
+        sys.exit(0)
+        
+except Exception as e:
+    print(f"\n❌ Script failed with error: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
