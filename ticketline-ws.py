@@ -640,7 +640,7 @@ try:
         main_events = []
         all_events = []
         
-        for i in range(7):
+        for i in range(4):
         # for i in range(3):  # current month + next 2
             month = (today.month + i - 1) % 12 + 1
             year = today.year + ((today.month + i - 1) // 12)

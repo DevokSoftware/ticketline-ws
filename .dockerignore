@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.env.local
+.env.production
+.git/
+.gitignore
+*.md
+todo.txt
+setup.py
+.DS_Store
+
