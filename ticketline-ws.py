@@ -347,6 +347,7 @@ def save_events_to_db(events, standups):
         INSERT INTO event (name, date, url, location, standup_id, priority) 
         VALUES (%s, %s, %s, %s, %s, 1)
         ON CONFLICT (standup_id, date) DO NOTHING
+        RETURNING id
         """
         
         saved_count = 0
@@ -396,9 +397,36 @@ def save_events_to_db(events, standups):
                         standup_id
                     ))
                     
-                    if cursor.rowcount > 0:
+                    result = cursor.fetchone()
+                    
+                    if result:
+                        # New event was created, get the event_id
+                        event_id = result[0]
                         saved_count += 1
                         print(f"💾 Saved: {event.title} (Standup: {standup_name}, Location: {location_name})")
+                        
+                        # Fetch comedians for this standup from standup_comedian table
+                        cursor.execute(
+                            "SELECT comedian_id FROM standup_comedian WHERE standup_id = %s",
+                            (standup_id,)
+                        )
+                        comedian_rows = cursor.fetchall()
+                        
+                        if comedian_rows:
+                            # Insert comedians into comedian_event table
+                            insert_comedian_event_sql = """
+                            INSERT INTO comedian_event (comedian_id, event_id)
+                            VALUES (%s, %s)
+                            ON CONFLICT DO NOTHING
+                            """
+                            
+                            comedian_count = 0
+                            for (comedian_id,) in comedian_rows:
+                                cursor.execute(insert_comedian_event_sql, (comedian_id, event_id))
+                                if cursor.rowcount > 0:
+                                    comedian_count += 1
+                        else:
+                            print(f"   ⚠️ No comedians found for standup '{standup_name}'")
                     else:
                         print(f"⏭️ Skipped (duplicate): {event.title}")
                         
